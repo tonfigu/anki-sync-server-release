@@ -3,10 +3,6 @@ name: Build Anki Sync Server (FreeBSD)
 
 on:
   push:
-    tags:
-      # 仅匹配 Anki 官方使用的纯数字版本标签格式，例如: 24.06.1, 24.04, 23.12.1
-      - '[0-9]+\.[0-9.]*'
-      # 移除了 'anki-*' 模式，因为它不符合实际标签格式
   workflow_dispatch:
     inputs:
       anki_version:
