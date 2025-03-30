@@ -1,0 +1,126 @@
+# 文件名: .github/workflows/build-anki-sync-server-freebsd.yml
+name: Build Anki Sync Server (FreeBSD)
+
+on:
+  push:
+    tags:
+      # 仅匹配 Anki 官方使用的纯数字版本标签格式，例如: 24.06.1, 24.04, 23.12.1
+      - '[0-9]+\.[0-9.]*'
+      # 移除了 'anki-*' 模式，因为它不符合实际标签格式
+  workflow_dispatch:
+    inputs:
+      anki_version:
+        description: '要构建和发布的 Anki 标签 (例如: 24.06.1)' # Anki 标签是纯数字格式
+        required: true
+        default: '24.06.1' # 示例默认值
+
+jobs:
+  release:
+    name: Build and Release Anki Sync Server on FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      # - name: Checkout code (optional)
+      #   uses: actions/checkout@v4
+
+      - name: Setup and Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: 14.1
+          prepare: |
+            pkg update -f
+            # 安装构建依赖: git, rust 工具链, protobuf 编译器, C 编译器, GNU Make, 根证书
+            pkg install -y git rust protobuf gcc gmake ca_root_nss
+            echo "Installed dependencies: git, rust, protobuf, gcc, gmake, ca_root_nss"
+          run: |
+            set -e # 发生错误时立即退出
+
+            echo "==================== 1. 确定 Anki 版本 ========================"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              ANKI_TAG_INPUT="${{ github.event.inputs.anki_version }}"
+            else
+              # 从推送的标签 ref_name 获取标签 (例如 '24.06.1')
+              ANKI_TAG_INPUT="${{ github.ref_name }}"
+            fi
+
+            echo "Raw Tag Input: ${ANKI_TAG_INPUT}"
+
+            # Anki 的 cargo install 需要 Git 仓库中存在的 *确切* 标签名。
+            # 实际标签是纯数字格式 (如 24.06.1)。我们直接使用这个标签。
+            ANKI_TAG="${ANKI_TAG_INPUT}"
+
+            if [ -z "${ANKI_TAG}" ]; then
+              echo "错误：无法确定 ANKI_TAG" >&2
+              exit 1
+            fi
+
+            # 将标签写入环境变量供后续步骤使用
+            echo "ANKI_TAG=${ANKI_TAG}" >> $GITHUB_ENV
+            echo "使用的 Anki 标签: ${ANKI_TAG}"
+
+            echo "==================== 2. 构建 Anki 同步服务器 ========================"
+            INSTALL_ROOT="/tmp/anki-install"
+            mkdir -p "${INSTALL_ROOT}"
+
+            echo "正在运行 cargo install..."
+            # 使用 cargo 从指定 Anki 标签构建 anki-sync-server
+            cargo install --git https://github.com/ankitects/anki.git \
+              --tag "${ANKI_TAG}" \
+              --root "${INSTALL_ROOT}" \
+              --locked \
+              anki-sync-server
+
+            echo "Cargo install 完成。"
+
+            BUILT_BINARY="${INSTALL_ROOT}/bin/anki-sync-server"
+
+            echo "==================== 3. 检查输出文件 ========================"
+            if [ -f "${BUILT_BINARY}" ]; then
+              echo "找到二进制文件: ${BUILT_BINARY}"
+              ls -l "${BUILT_BINARY}"
+              file "${BUILT_BINARY}" # 确认文件类型
+            else
+              echo "错误：构建失败，未找到二进制文件 ${BUILT_BINARY}" >&2
+              exit 1
+            fi
+
+            echo "==================== 4. 准备输出归档文件 ========================"
+            mkdir -p ../output
+            cp "${BUILT_BINARY}" ../output/anki-sync-server
+            cd ../output
+
+            # 归档文件名包含版本和平台信息 (使用实际的纯数字标签)
+            ARCHIVE_BASE_NAME="anki-sync-server-freebsd-amd64-${ANKI_TAG}"
+            zip "${ARCHIVE_BASE_NAME}.zip" anki-sync-server
+            tar -czf "${ARCHIVE_BASE_NAME}.tar.gz" anki-sync-server
+
+            echo "已创建归档文件:"
+            ls -l *.zip *.tar.gz
+
+            # 将压缩包路径写入环境变量
+            echo "ARCHIVE_ZIP=${ARCHIVE_BASE_NAME}.zip" >> $GITHUB_ENV
+            echo "ARCHIVE_TAR_GZ=${ARCHIVE_BASE_NAME}.tar.gz" >> $GITHUB_ENV
+            cd ..
+
+            echo "==================== 5. 构建完成 ========================"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anki-sync-server-freebsd-amd64-${{ env.ANKI_TAG }}
+          path: |
+            output/*.zip
+            output/*.tar.gz
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          # Release 的标签与触发构建的 Anki 标签一致 (纯数字格式)
+          tag: ${{ env.ANKI_TAG }}
+          artifacts: "output/${{ env.ARCHIVE_ZIP }},output/${{ env.ARCHIVE_TAR_GZ }}"
+          allowUpdates: true
+          generateReleaseNotes: true
+          makeLatest: true
+          replacesArtifacts: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
