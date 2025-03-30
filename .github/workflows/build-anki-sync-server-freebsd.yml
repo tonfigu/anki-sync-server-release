@@ -1,121 +1,171 @@
 # 文件名: .github/workflows/build-anki-sync-server-freebsd.yml
-name: Manually Build Anki Sync Server (FreeBSD) # 可以稍微改下名字，强调手动
+name: Manually Build Anki Sync Server (Select Versions)
 
-# 触发器：仅允许手动触发
 on:
   workflow_dispatch:
     inputs:
       anki_version:
-        description: '要构建和发布的 Anki 标签 (例如: 24.06.1)' # Anki 标签是纯数字格式
-        required: true # 手动触发时必须提供版本号
+        description: |
+          输入要构建的 Anki 官方 Git 标签。
+          **请在此处查找有效标签:** https://github.com/ankitects/anki/tags
+          (例如: 24.06.1, 24.04.1, 23.12.1)
+        required: true
+        type: string
         default: '24.06.1' # 提供一个最新的默认值示例
+      freebsd_version:
+        description: '选择用于构建的 FreeBSD 版本 (VM 环境)'
+        required: true
+        type: choice
+        options:
+          - '14.1' # 最新稳定版 (推荐)
+          - '14.0'
+          - '13.3' # 上一个稳定版分支
+          # - '15.0-CURRENT' # 如果需要测试开发版 (可能不稳定)
+        default: '14.1' # 默认使用最新的稳定版
 
 jobs:
   release:
-    name: Build and Release Anki Sync Server on FreeBSD
-    runs-on: ubuntu-latest # 使用 ubuntu runner 来启动 FreeBSD VM
+    # Job 名称包含选择的版本，方便在运行列表中识别
+    name: Build Anki (${{ github.event.inputs.anki_version }}) on FreeBSD (${{ github.event.inputs.freebsd_version }})
+    runs-on: ubuntu-latest
     steps:
-      # FreeBSD 虚拟机环境设置与构建步骤
       - name: Setup and Build on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
-          usesh: true # 使用 sh 而不是默认的 C shell
-          release: 14.1 # 指定 FreeBSD 版本
+          usesh: true
+          # 使用用户选择的 FreeBSD 版本
+          release: ${{ github.event.inputs.freebsd_version }}
           prepare: |
+            echo "===== Installing Dependencies on FreeBSD ${{ github.event.inputs.freebsd_version }} ====="
             pkg update -f
-            # 安装构建依赖: git, rust 工具链, protobuf 编译器, C 编译器, GNU Make, 根证书
             pkg install -y git rust protobuf gcc gmake ca_root_nss
             echo "Installed dependencies: git, rust, protobuf, gcc, gmake, ca_root_nss"
           run: |
-            set -e # 发生错误时立即退出
+            set -e # 在遇到错误时退出脚本
 
-            echo "==================== 1. 确定 Anki 版本 ========================"
-            # 因为是手动触发，版本号直接来自输入参数
+            echo "==================== 1. Determine Anki Version ========================"
+            # 从手动输入获取 Anki 版本标签
             ANKI_TAG_INPUT="${{ github.event.inputs.anki_version }}"
-            echo "Manual Input Tag: ${ANKI_TAG_INPUT}"
+            echo "Manual Input Anki Tag: ${ANKI_TAG_INPUT}"
 
-            # Anki 的 cargo install 需要 Git 仓库中存在的 *确切* 标签名。
-            # 实际标签是纯数字格式 (如 24.06.1)。我们直接使用这个标签。
-            ANKI_TAG="${ANKI_TAG_INPUT}"
+            # 基础的标签格式验证 (可选)
+            if ! echo "${ANKI_TAG_INPUT}" | grep -Eq '^[0-9]+\.[0-9.]+([0-9a-zA-Z.-]*)$'; then
+              echo "警告：输入的 Anki 标签 '${ANKI_TAG_INPUT}' 格式可能不标准，但仍会尝试构建。"
+            fi
 
+            ANKI_TAG="${ANKI_TAG_INPUT}" # 直接使用输入值
             if [ -z "${ANKI_TAG}" ]; then
-              echo "错误：必须提供 Anki 版本标签" >&2
+              echo "错误：必须通过输入提供 Anki 版本标签" >&2
               exit 1
             fi
 
-            # 将标签写入环境变量供后续步骤使用
+            # 将确定的 Anki 标签设置为环境变量，供后续步骤使用
             echo "ANKI_TAG=${ANKI_TAG}" >> $GITHUB_ENV
-            echo "使用的 Anki 标签: ${ANKI_TAG}"
+            echo "Using Anki Tag: ${ANKI_TAG}"
+            echo "Building on FreeBSD Version: ${{ github.event.inputs.freebsd_version }}"
+            echo "Current directory in VM: $(pwd)" # 打印当前VM内的工作目录，通常是 /root/work
 
-            echo "==================== 2. 构建 Anki 同步服务器 ========================"
+            echo "==================== 2. Build Anki Sync Server ========================"
+            # 临时安装目录，避免污染工作区
             INSTALL_ROOT="/tmp/anki-install"
             mkdir -p "${INSTALL_ROOT}"
 
-            echo "正在运行 cargo install..."
-            # 使用 cargo 从指定 Anki 标签构建 anki-sync-server
+            echo "Running cargo install for tag ${ANKI_TAG}..."
+            # 使用确定的 ANKI_TAG 进行构建
             cargo install --git https://github.com/ankitects/anki.git \
               --tag "${ANKI_TAG}" \
               --root "${INSTALL_ROOT}" \
               --locked \
               anki-sync-server
 
-            echo "Cargo install 完成。"
+            echo "Cargo install finished."
 
+            # 构建出的二进制文件路径
             BUILT_BINARY="${INSTALL_ROOT}/bin/anki-sync-server"
 
-            echo "==================== 3. 检查输出文件 ========================"
+            echo "==================== 3. Check Output File ========================"
             if [ -f "${BUILT_BINARY}" ]; then
-              echo "找到二进制文件: ${BUILT_BINARY}"
+              echo "Binary found: ${BUILT_BINARY}"
               ls -l "${BUILT_BINARY}"
-              file "${BUILT_BINARY}" # 确认文件类型
+              file "${BUILT_BINARY}" # 显示文件类型信息
             else
               echo "错误：构建失败，未找到二进制文件 ${BUILT_BINARY}" >&2
+              # 打印临时安装目录内容以供调试
+              echo "Contents of ${INSTALL_ROOT}:"
+              find "${INSTALL_ROOT}"
               exit 1
             fi
 
-            echo "==================== 4. 准备输出归档文件 ========================"
-            mkdir -p ../output
-            cp "${BUILT_BINARY}" ../output/anki-sync-server
-            cd ../output
+            echo "==================== 4. Prepare Output Archives ========================"
+            # 在当前工作目录 (应为 /root/work) 下创建 output 目录
+            OUTPUT_DIR="./output"
+            mkdir -p "${OUTPUT_DIR}"
+            echo "Created output directory: $(pwd)/${OUTPUT_DIR}"
 
-            # 归档文件名包含版本和平台信息 (使用输入的纯数字标签)
+            # 将构建好的二进制文件复制到 output 目录
+            cp "${BUILT_BINARY}" "${OUTPUT_DIR}/anki-sync-server"
+            echo "Copied binary to output directory."
+
+            # 进入 output 目录方便打包
+            cd "${OUTPUT_DIR}"
+            echo "Changed directory to: $(pwd)"
+
+            # 定义压缩包的基础名称，包含 Anki 版本和平台信息
             ARCHIVE_BASE_NAME="anki-sync-server-freebsd-amd64-${ANKI_TAG}"
+
+            # 创建 zip 和 tar.gz 压缩包
+            echo "Creating archives..."
             zip "${ARCHIVE_BASE_NAME}.zip" anki-sync-server
             tar -czf "${ARCHIVE_BASE_NAME}.tar.gz" anki-sync-server
 
-            echo "已创建归档文件:"
+            echo "Created archives in $(pwd):"
             ls -l *.zip *.tar.gz
 
-            # 将压缩包路径写入环境变量
+            # 将压缩包文件名设置为环境变量，供后续步骤（如 Release）使用
             echo "ARCHIVE_ZIP=${ARCHIVE_BASE_NAME}.zip" >> $GITHUB_ENV
             echo "ARCHIVE_TAR_GZ=${ARCHIVE_BASE_NAME}.tar.gz" >> $GITHUB_ENV
+
+            # 返回到原始工作目录（/root/work）
             cd ..
+            echo "Returned to directory: $(pwd)"
 
-            echo "==================== 5. 构建完成 ========================"
+            echo "==================== 5. Build completed in VM ========================"
 
-      # 上传构建产物到 GitHub Actions，方便下载或调试
+      # vmactions/freebsd-vm 会自动将 VM 的工作目录内容同步回 Runner 的 $GITHUB_WORKSPACE
+
+      - name: List files in workspace after VM sync # 添加此步骤用于调试，确认文件已同步回 Runner
+        run: |
+          echo "Listing files in $GITHUB_WORKSPACE:"
+          ls -lR $GITHUB_WORKSPACE
+          echo "Looking specifically in $GITHUB_WORKSPACE/output:"
+          ls -l $GITHUB_WORKSPACE/output
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          # Artifact 名称清晰地指明了 Anki 版本
           name: anki-sync-server-freebsd-amd64-${{ env.ANKI_TAG }}
+          # path 指向 Runner 上的 $GITHUB_WORKSPACE/output/ 目录下的文件
           path: |
             output/*.zip
             output/*.tar.gz
+          if-no-files-found: error # 如果没有找到文件则报错
 
-      # 创建 GitHub Release 并上传构建产物
       - name: Release
-        # 注意：手动触发时，如果输入的版本标签 X 已存在 Release，
-        # 'allowUpdates: true' 和 'replacesArtifacts: true' 会更新这个 Release。
-        # 如果 'makeLatest: true'，这个 Release 会被标记为 'Latest'。
         uses: ncipollo/release-action@v1
+        if: success() # 仅在前面步骤成功时执行
         with:
-          # Release 的标签使用手动输入的 Anki 版本标签
+          # Release 的标签使用构建的 Anki 版本标签
           tag: ${{ env.ANKI_TAG }}
+          # Release 的名称可以自定义，这里包含了 Anki 版本和 FreeBSD 版本
+          # name: Anki Sync Server ${{ env.ANKI_TAG }} (Built on FreeBSD ${{ github.event.inputs.freebsd_version }})
+          # artifacts 指向 Runner 上的 $GITHUB_WORKSPACE/output/ 目录下的文件
           artifacts: "output/${{ env.ARCHIVE_ZIP }},output/${{ env.ARCHIVE_TAR_GZ }}"
-          allowUpdates: true        # 允许更新已存在的 Release
+          allowUpdates: true        # 允许更新同名 Tag 的 Release
           generateReleaseNotes: true # 自动生成 Release Notes
-          makeLatest: true          # 将此 Release 标记为仓库的最新版本
-          replacesArtifacts: true   # 如果 Artifacts 已存在，则替换它们
+          makeLatest: true          # 将此 Release 标记为 latest
+          replacesArtifacts: true   # 替换已存在的同名 Artifacts
         env:
-          # 需要仓库写入权限来创建/更新 Release
+          # 需要 GITHUB_TOKEN 才能创建 Release
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
