@@ -1,28 +1,26 @@
 # 文件名: .github/workflows/build-anki-sync-server-freebsd.yml
-name: Build Anki Sync Server (FreeBSD)
+name: Manually Build Anki Sync Server (FreeBSD) # 可以稍微改下名字，强调手动
 
+# 触发器：仅允许手动触发
 on:
-  push:
   workflow_dispatch:
     inputs:
       anki_version:
         description: '要构建和发布的 Anki 标签 (例如: 24.06.1)' # Anki 标签是纯数字格式
-        required: true
-        default: '24.06.1' # 示例默认值
+        required: true # 手动触发时必须提供版本号
+        default: '24.06.1' # 提供一个最新的默认值示例
 
 jobs:
   release:
     name: Build and Release Anki Sync Server on FreeBSD
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 使用 ubuntu runner 来启动 FreeBSD VM
     steps:
-      # - name: Checkout code (optional)
-      #   uses: actions/checkout@v4
-
+      # FreeBSD 虚拟机环境设置与构建步骤
       - name: Setup and Build on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
-          usesh: true
-          release: 14.1
+          usesh: true # 使用 sh 而不是默认的 C shell
+          release: 14.1 # 指定 FreeBSD 版本
           prepare: |
             pkg update -f
             # 安装构建依赖: git, rust 工具链, protobuf 编译器, C 编译器, GNU Make, 根证书
@@ -32,21 +30,16 @@ jobs:
             set -e # 发生错误时立即退出
 
             echo "==================== 1. 确定 Anki 版本 ========================"
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              ANKI_TAG_INPUT="${{ github.event.inputs.anki_version }}"
-            else
-              # 从推送的标签 ref_name 获取标签 (例如 '24.06.1')
-              ANKI_TAG_INPUT="${{ github.ref_name }}"
-            fi
-
-            echo "Raw Tag Input: ${ANKI_TAG_INPUT}"
+            # 因为是手动触发，版本号直接来自输入参数
+            ANKI_TAG_INPUT="${{ github.event.inputs.anki_version }}"
+            echo "Manual Input Tag: ${ANKI_TAG_INPUT}"
 
             # Anki 的 cargo install 需要 Git 仓库中存在的 *确切* 标签名。
             # 实际标签是纯数字格式 (如 24.06.1)。我们直接使用这个标签。
             ANKI_TAG="${ANKI_TAG_INPUT}"
 
             if [ -z "${ANKI_TAG}" ]; then
-              echo "错误：无法确定 ANKI_TAG" >&2
+              echo "错误：必须提供 Anki 版本标签" >&2
               exit 1
             fi
 
@@ -85,7 +78,7 @@ jobs:
             cp "${BUILT_BINARY}" ../output/anki-sync-server
             cd ../output
 
-            # 归档文件名包含版本和平台信息 (使用实际的纯数字标签)
+            # 归档文件名包含版本和平台信息 (使用输入的纯数字标签)
             ARCHIVE_BASE_NAME="anki-sync-server-freebsd-amd64-${ANKI_TAG}"
             zip "${ARCHIVE_BASE_NAME}.zip" anki-sync-server
             tar -czf "${ARCHIVE_BASE_NAME}.tar.gz" anki-sync-server
@@ -100,6 +93,7 @@ jobs:
 
             echo "==================== 5. 构建完成 ========================"
 
+      # 上传构建产物到 GitHub Actions，方便下载或调试
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -108,15 +102,20 @@ jobs:
             output/*.zip
             output/*.tar.gz
 
+      # 创建 GitHub Release 并上传构建产物
       - name: Release
+        # 注意：手动触发时，如果输入的版本标签 X 已存在 Release，
+        # 'allowUpdates: true' 和 'replacesArtifacts: true' 会更新这个 Release。
+        # 如果 'makeLatest: true'，这个 Release 会被标记为 'Latest'。
         uses: ncipollo/release-action@v1
         with:
-          # Release 的标签与触发构建的 Anki 标签一致 (纯数字格式)
+          # Release 的标签使用手动输入的 Anki 版本标签
           tag: ${{ env.ANKI_TAG }}
           artifacts: "output/${{ env.ARCHIVE_ZIP }},output/${{ env.ARCHIVE_TAR_GZ }}"
-          allowUpdates: true
-          generateReleaseNotes: true
-          makeLatest: true
-          replacesArtifacts: true
+          allowUpdates: true        # 允许更新已存在的 Release
+          generateReleaseNotes: true # 自动生成 Release Notes
+          makeLatest: true          # 将此 Release 标记为仓库的最新版本
+          replacesArtifacts: true   # 如果 Artifacts 已存在，则替换它们
         env:
+          # 需要仓库写入权限来创建/更新 Release
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
